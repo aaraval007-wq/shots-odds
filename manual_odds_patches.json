@@ -1,0 +1,26 @@
+[
+  {
+    "home_team": "Udinese",
+    "away_team": "Parma",
+    "date": "2020-10-18",
+    "odds_h": 1.9,
+    "odds_d": 3.5,
+    "odds_a": 4.0
+  },
+  {
+    "home_team": "Verona",
+    "away_team": "Genoa",
+    "date": "2020-10-19",
+    "odds_h": 2.25,
+    "odds_d": 3.5,
+    "odds_a": 3.0
+  },
+  {
+    "home_team": "Torino",
+    "away_team": "Fiorentina",
+    "date": "2022-01-10",
+    "odds_h": 3.0,
+    "odds_d": 3.3,
+    "odds_a": 2.4
+  }
+]
