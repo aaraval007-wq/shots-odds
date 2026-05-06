@@ -1,0 +1,4 @@
+- Check if there is a good way to store the data somewhere so that it doesnt take long for the past data to be made
+- start working on making the future matches dataset
+
+- work on taking in the data and using the model on the data
