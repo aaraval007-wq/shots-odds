@@ -1,3 +1,4 @@
+- add comments on the new stuff and see if it can be made a bit smaller
 - Check if there is a good way to store the data somewhere so that it doesnt take long for the past data to be made
 - Fully understand how to use the API and then integrate the API to build a massive df with past adj shots with PreparePastData
 
