@@ -1,4 +1,4 @@
 - Check if there is a good way to store the data somewhere so that it doesnt take long for the past data to be made
-- start working on making the future matches dataset
+- Fully understand how to use the API and then integrate the API to build a massive df with past adj shots with PreparePastData
 
 - work on taking in the data and using the model on the data
