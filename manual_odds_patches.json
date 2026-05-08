@@ -22,5 +22,13 @@
     "odds_h": 3.0,
     "odds_d": 3.3,
     "odds_a": 2.4
+  },
+  {
+    "home_team": "Monaco",
+    "away_team": "Montpellier",
+    "date": "2020-10-18",
+    "odds_h": 1.9,
+    "odds_d": 3.6,
+    "odds_a": 4.0
   }
 ]
