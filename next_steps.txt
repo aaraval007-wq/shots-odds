@@ -1,4 +1,5 @@
-- add comments on the new stuff and see if it can be made a bit smaller
-- Check if there is a good way to store the data somewhere so that it doesnt take long for the past data to be made
+- check how the future data is getting filtered in prepare_data
+- Make the output class and final ipynb
 
-- work on taking in the data and using the model on the data
+- check if prepare_data can be optimised
+

@@ -45,6 +45,7 @@ class PreparePastData:
         current_year = datetime.now().year
         start_year = current_year - 10
         end_year = current_year + 1
+        # football-data.co.uk season codes look like "1516" (2015-16), "2324" (2023-24)
         return [
             f"{str(y)[2:]}{str(y + 1)[2:]}"
             for y in range(start_year, end_year)
@@ -92,6 +93,7 @@ class PreparePastData:
         df['prob_d'] = 1 / df['odds_d']
         df['prob_a'] = 1 / df['odds_a']
 
+        # Divide by the sum to strip the bookmaker's overround (vig), giving true implied probs
         total = df['prob_h'] + df['prob_d'] + df['prob_a']
         df['prob_h'] = df['prob_h'] / total
         df['prob_d'] = df['prob_d'] / total
@@ -190,10 +192,13 @@ class PreparePastData:
         long_df = long_df.sort_values(['team', 'season', 'date']).reset_index(drop=True)
 
         def expanding_league_avg(group):
+            # shift(1) ensures each row only sees games that have already been played (no lookahead)
             group = group.copy()
             group['expanding_avg_home_shots'] = group['home_shots'].expanding().mean().shift(1)
             group['expanding_avg_away_shots'] = group['away_shots'].expanding().mean().shift(1)
+            # Midpoint between home/away league averages — the "neutral-venue" shot baseline
             group['expanding_neutral'] = (group['expanding_avg_home_shots'] + group['expanding_avg_away_shots']) / 2
+            # Per-team average shots conceded in a neutral context (total / 2)
             group['expanding_avg_shots_conc'] = (group['home_shots'] + group['away_shots']).expanding().mean().shift(1) / 2
             return group
 
@@ -219,6 +224,7 @@ class PreparePastData:
                    .groupby(['team', 'season'], group_keys=False)
                    .apply(rolling_shots_conc))
 
+        # Multiple matches share the same date; .last() keeps the most up-to-date expanding average
         league_season_stats_dedup = (league_season_stats
                                      .sort_values('date')
                                      .groupby(['date', 'league', 'season'])
@@ -227,6 +233,8 @@ class PreparePastData:
 
         long_df = long_df.merge(league_season_stats_dedup, on=['date', 'league', 'season'], how='left')
 
+        # Remove venue bias: subtract the home premium for home teams, add it back for away teams,
+        # so both sides are expressed on the same neutral-venue scale
         long_df['neutral_shots'] = long_df.apply(
             lambda row: row['shots_scored'] - (row['expanding_avg_home_shots'] - row['expanding_neutral'])
             if row['venue'] == 'home'
@@ -242,6 +250,9 @@ class PreparePastData:
 
         long_df = long_df.merge(opp_stats, on=['opponent', 'date', 'season'], how='left')
 
+        # Scale neutral shots by how tough the opponent's defence is relative to league average:
+        # ratio > 1 means opponent concedes more than average (weak defence) → deflate shots,
+        # ratio < 1 means opponent concedes less (strong defence) → inflate shots
         long_df['adj_shots'] = (long_df['neutral_shots'] *
                                 (long_df['expanding_avg_shots_conc'] / long_df['opp_def_strength']))
 
@@ -390,7 +401,8 @@ class PreparePastData:
                                           .mean())
             return group
 
-        # adj_shots already exists on past rows; future rows have NaN
+        # adj_shots is NaN on future rows so they don't corrupt the rolling window,
+        # but their rolling_adj_shots still picks up the last N past values correctly
         combined = (combined.sort_values(['team', 'season', 'date'])
                     .groupby(['team', 'season'], group_keys=False)
                     .apply(rolling_adj_shots))
