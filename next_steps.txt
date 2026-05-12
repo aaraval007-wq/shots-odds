@@ -1,0 +1,5 @@
+- check how the future data is getting filtered in prepare_data
+- Make the output class and final ipynb
+
+- check if prepare_data can be optimised
+
