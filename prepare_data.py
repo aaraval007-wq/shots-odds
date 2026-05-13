@@ -441,8 +441,7 @@ class PreparePastData:
 
         # Drop matches where either team lacks enough history for a rolling window
         before = len(future_df)
-        future_df = future_df.dropna(subset=['home_adj_shots', 'home_adj_shots_conc',
-                                              'away_adj_shots', 'away_adj_shots_conc'])
+        future_df = future_df.dropna(subset=['home_adj_shots', 'home_adj_shots_conc','away_adj_shots', 'away_adj_shots_conc'])
         dropped = before - len(future_df)
         if dropped > 0:
             print(f"[PreparePastData] Dropped {dropped} future match(es) with insufficient rolling history.")
