@@ -5,12 +5,16 @@ import requests
 from io import StringIO
 import json
 from pathlib import Path
+from rapidfuzz import process, fuzz
 
 
 class PreparePastData:
-    def __init__(self, patches_path: str = 'manual_odds_patches.json',
+    def __init__(self,
+                 patches_path: str = 'manual_odds_patches.json',
+                 name_map_path: str = 'team_name_map.json',
                  odds_api_key: str = 'd88a85887c730ce9a8c6575e7ba532b4'):
         self.patches_path = Path(patches_path)
+        self.name_map_path = Path(name_map_path)
         self.odds_api_key = odds_api_key
         self.url = "https://www.football-data.co.uk/mmz4281/{season}/{league}.csv"
 
@@ -38,18 +42,21 @@ class PreparePastData:
         self.all_data = self._combine()
 
     # ------------------------------------------------------------------ #
-    #  PAST DATA — unchanged methods                                       #
+    #  SEASONS                                                             #
     # ------------------------------------------------------------------ #
 
     def _generate_seasons(self) -> list[str]:
         current_year = datetime.now().year
         start_year = current_year - 10
         end_year = current_year + 1
-        # football-data.co.uk season codes look like "1516" (2015-16), "2324" (2023-24)
         return [
             f"{str(y)[2:]}{str(y + 1)[2:]}"
             for y in range(start_year, end_year)
         ]
+
+    # ------------------------------------------------------------------ #
+    #  DOWNLOAD                                                            #
+    # ------------------------------------------------------------------ #
 
     def _download_season(self, league_code: str, season: str) -> pd.DataFrame | None:
         url = self.url.format(season=season, league=league_code)
@@ -73,6 +80,10 @@ class PreparePastData:
                     all_dfs.append(df)
         return pd.concat(all_dfs, ignore_index=True) if all_dfs else pd.DataFrame()
 
+    # ------------------------------------------------------------------ #
+    #  CLEAN                                                               #
+    # ------------------------------------------------------------------ #
+
     def _clean(self) -> pd.DataFrame:
         odds_cols = ['B365H', 'B365D', 'B365A']
         COLS = ['Date', 'HomeTeam', 'AwayTeam', 'HS', 'AS'] + odds_cols + ['league', 'season']
@@ -93,7 +104,6 @@ class PreparePastData:
         df['prob_d'] = 1 / df['odds_d']
         df['prob_a'] = 1 / df['odds_a']
 
-        # Divide by the sum to strip the bookmaker's overround (vig), giving true implied probs
         total = df['prob_h'] + df['prob_d'] + df['prob_a']
         df['prob_h'] = df['prob_h'] / total
         df['prob_d'] = df['prob_d'] / total
@@ -108,6 +118,10 @@ class PreparePastData:
             print("\nUse patch_odds() to manually supply odds for any of these.\n")
 
         return df
+
+    # ------------------------------------------------------------------ #
+    #  ODDS PATCHES                                                        #
+    # ------------------------------------------------------------------ #
 
     def _apply_patches(self) -> None:
         if not self.patches_path.exists():
@@ -169,6 +183,148 @@ class PreparePastData:
             print(f"[PreparePastData] No match found for {home_team} vs {away_team} on {date}.")
         return result
 
+    # ------------------------------------------------------------------ #
+    #  TEAM NAME MAPPING                                                   #
+    # ------------------------------------------------------------------ #
+
+    def _load_name_map(self) -> dict[str, str]:
+        """Load confirmed odds-API name -> football-data name mappings from disk."""
+        if not self.name_map_path.exists():
+            return {}
+        with open(self.name_map_path, 'r') as f:
+            return json.load(f)
+
+    def _save_name_map(self, name_map: dict[str, str]) -> None:
+        with open(self.name_map_path, 'w') as f:
+            json.dump(name_map, f, indent=2, sort_keys=True)
+
+    def _apply_name_map(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Translate odds-API team names to their football-data equivalents.
+
+        Names that are already exact matches to a football-data name pass
+        through unchanged. Names in the confirmed map are translated. Any
+        remaining unknown names cause that match to be dropped with a warning
+        prompting the user to run review_team_names().
+        """
+        name_map = self._load_name_map()
+        fd_names = set(self.data['home_team']).union(set(self.data['away_team']))
+
+        df = df.copy()
+
+        def translate(name: str) -> str | None:
+            if name in fd_names:
+                return name
+            if name in name_map:
+                return name_map[name]
+            return None
+
+        df['home_team'] = df['home_team'].map(translate)
+        df['away_team'] = df['away_team'].map(translate)
+
+        unknown_mask = df['home_team'].isna() | df['away_team'].isna()
+        unknown_count = unknown_mask.sum()
+
+        if unknown_count > 0:
+            print(
+                f"\n[PreparePastData] {unknown_count} future match(es) dropped — "
+                f"team name(s) not in name map.\n"
+                f"  Run pp.review_team_names() to resolve missing mappings.\n"
+            )
+            df = df[~unknown_mask]
+
+        return df.reset_index(drop=True)
+
+    def review_team_names(self) -> None:
+        """
+        Interactive workflow to resolve unmatched odds-API team names.
+
+        For each odds-API name not already in the confirmed map or the
+        football-data name list, shows the 2 closest football-data candidates
+        and prompts you to pick one or enter a manual override. Confirmed
+        mappings are saved to team_name_map.json immediately so you never
+        have to resolve the same name twice.
+
+        Only names that genuinely differ between sources need entries —
+        exact matches are skipped automatically.
+        """
+        name_map = self._load_name_map()
+        fd_names = sorted(set(self.data['home_team']).union(set(self.data['away_team'])))
+
+        print("[review_team_names] Fetching current future odds to collect team names...")
+        future_odds = self._fetch_future_odds()
+        if future_odds.empty:
+            print("[review_team_names] No future odds available — nothing to review.")
+            return
+
+        odds_api_names = sorted(
+            set(future_odds['home_team']).union(set(future_odds['away_team']))
+        )
+
+        unresolved = [
+            name for name in odds_api_names
+            if name not in fd_names and name not in name_map
+        ]
+
+        if not unresolved:
+            print("[review_team_names] All team names are already mapped. Nothing to do.")
+            return
+
+        print(f"\n[review_team_names] {len(unresolved)} unresolved name(s) to review.")
+        print("  Enter the number of your chosen match, 'm' to type manually, or 's' to skip.\n")
+
+        newly_confirmed = 0
+
+        for odds_name in unresolved:
+            candidates = process.extract(
+                odds_name,
+                fd_names,
+                scorer=fuzz.WRatio,
+                limit=2
+            )
+
+            print(f"  Odds-API name : '{odds_name}'")
+            for i, (candidate, score, _) in enumerate(candidates, start=1):
+                print(f"    [{i}] '{candidate}'  (score: {score:.0f})")
+            print(f"    [m] Enter manually")
+            print(f"    [s] Skip for now")
+
+            while True:
+                choice = input("  Your choice: ").strip().lower()
+
+                if choice in ('s', ''):
+                    print(f"  Skipped '{odds_name}' — match will be dropped until resolved.\n")
+                    break
+
+                elif choice == 'm':
+                    manual = input("  Type the correct football-data name: ").strip()
+                    if manual in fd_names:
+                        name_map[odds_name] = manual
+                        self._save_name_map(name_map)
+                        print(f"  Saved: '{odds_name}' -> '{manual}'\n")
+                        newly_confirmed += 1
+                        break
+                    else:
+                        print(f"  '{manual}' not found in football-data names. Try again.")
+
+                elif choice in ('1', '2'):
+                    idx = int(choice) - 1
+                    chosen = candidates[idx][0]
+                    name_map[odds_name] = chosen
+                    self._save_name_map(name_map)
+                    print(f"  Saved: '{odds_name}' -> '{chosen}'\n")
+                    newly_confirmed += 1
+                    break
+
+                else:
+                    print("  Invalid input. Enter 1, 2, m, or s.")
+
+        print(f"\n[review_team_names] Done. {newly_confirmed} new mapping(s) saved to {self.name_map_path}.")
+
+    # ------------------------------------------------------------------ #
+    #  ADJUSTED SHOTS                                                      #
+    # ------------------------------------------------------------------ #
+
     def _create_adj_shots(self) -> None:
         data = self.data
 
@@ -192,13 +348,10 @@ class PreparePastData:
         long_df = long_df.sort_values(['team', 'season', 'date']).reset_index(drop=True)
 
         def expanding_league_avg(group):
-            # shift(1) ensures each row only sees games that have already been played (no lookahead)
             group = group.copy()
             group['expanding_avg_home_shots'] = group['home_shots'].expanding().mean().shift(1)
             group['expanding_avg_away_shots'] = group['away_shots'].expanding().mean().shift(1)
-            # Midpoint between home/away league averages — the "neutral-venue" shot baseline
             group['expanding_neutral'] = (group['expanding_avg_home_shots'] + group['expanding_avg_away_shots']) / 2
-            # Per-team average shots conceded in a neutral context (total / 2)
             group['expanding_avg_shots_conc'] = (group['home_shots'] + group['away_shots']).expanding().mean().shift(1) / 2
             return group
 
@@ -224,7 +377,6 @@ class PreparePastData:
                    .groupby(['team', 'season'], group_keys=False)
                    .apply(rolling_shots_conc))
 
-        # Multiple matches share the same date; .last() keeps the most up-to-date expanding average
         league_season_stats_dedup = (league_season_stats
                                      .sort_values('date')
                                      .groupby(['date', 'league', 'season'])
@@ -233,8 +385,6 @@ class PreparePastData:
 
         long_df = long_df.merge(league_season_stats_dedup, on=['date', 'league', 'season'], how='left')
 
-        # Remove venue bias: subtract the home premium for home teams, add it back for away teams,
-        # so both sides are expressed on the same neutral-venue scale
         long_df['neutral_shots'] = long_df.apply(
             lambda row: row['shots_scored'] - (row['expanding_avg_home_shots'] - row['expanding_neutral'])
             if row['venue'] == 'home'
@@ -250,9 +400,6 @@ class PreparePastData:
 
         long_df = long_df.merge(opp_stats, on=['opponent', 'date', 'season'], how='left')
 
-        # Scale neutral shots by how tough the opponent's defence is relative to league average:
-        # ratio > 1 means opponent concedes more than average (weak defence) → deflate shots,
-        # ratio < 1 means opponent concedes less (strong defence) → inflate shots
         long_df['adj_shots'] = (long_df['neutral_shots'] *
                                 (long_df['expanding_avg_shots_conc'] / long_df['opp_def_strength']))
 
@@ -285,7 +432,7 @@ class PreparePastData:
                                    'away_adj_shots', 'away_adj_shots_conc'])
 
         self.data = data
-        self._long_df = long_df  # cache for reuse in future adj shots computation
+        self._long_df = long_df
 
     # ------------------------------------------------------------------ #
     #  FUTURE DATA                                                         #
@@ -345,7 +492,6 @@ class PreparePastData:
 
         df = pd.DataFrame(rows).sort_values("date").reset_index(drop=True)
 
-        # Normalise probabilities
         df['prob_h'] = 1 / df['odds_h']
         df['prob_d'] = 1 / df['odds_d']
         df['prob_a'] = 1 / df['odds_a']
@@ -358,24 +504,17 @@ class PreparePastData:
         return df
 
     def _create_future_adj_shots(self, future_df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Compute rolling_adj_shots and opp_rolling_shots_conc for future matches
-        using only past data. Drops matches where either team has fewer than
-        3 games in their rolling window.
-        """
-        # Work out current season — most recent season in past data
         current_season = self.data['season'].max()
-
-        # Pull the cached long_df from past data — we'll extend it with future rows
         past_long = self._long_df.copy()
+        past_long['_is_future'] = False
 
-        # Build future long rows — one home, one away per match, shots unknown
         future_home = future_df[['date', 'league', 'home_team', 'away_team']].copy()
         future_home = future_home.rename(columns={'home_team': 'team', 'away_team': 'opponent'})
         future_home['venue'] = 'home'
         future_home['season'] = current_season
         future_home['shots_scored'] = np.nan
         future_home['shots_conceded'] = np.nan
+        future_home['_is_future'] = True
 
         future_away = future_df[['date', 'league', 'away_team', 'home_team']].copy()
         future_away = future_away.rename(columns={'away_team': 'team', 'home_team': 'opponent'})
@@ -383,16 +522,12 @@ class PreparePastData:
         future_away['season'] = current_season
         future_away['shots_scored'] = np.nan
         future_away['shots_conceded'] = np.nan
+        future_away['_is_future'] = True
 
         future_long = pd.concat([future_home, future_away], ignore_index=True)
-
-        # Stack past + future long rows, sort by team/season/date
         combined = pd.concat([past_long, future_long], ignore_index=True)
         combined = combined.sort_values(['team', 'season', 'date']).reset_index(drop=True)
 
-        # Recompute rolling_adj_shots across the combined df
-        # For future rows adj_shots is NaN so they don't pollute the window,
-        # but their rolling_adj_shots will correctly look back into past rows
         def rolling_adj_shots(group):
             group = group.copy()
             group['rolling_adj_shots'] = (group['adj_shots']
@@ -401,13 +536,6 @@ class PreparePastData:
                                           .mean())
             return group
 
-        # adj_shots is NaN on future rows so they don't corrupt the rolling window,
-        # but their rolling_adj_shots still picks up the last N past values correctly
-        combined = (combined.sort_values(['team', 'season', 'date'])
-                    .groupby(['team', 'season'], group_keys=False)
-                    .apply(rolling_adj_shots))
-
-        # Recompute opp_rolling_shots_conc the same way
         def rolling_shots_conc(group):
             group = group.copy()
             group['opp_rolling_shots_conc'] = (group['shots_conceded']
@@ -418,12 +546,14 @@ class PreparePastData:
 
         combined = (combined.sort_values(['team', 'season', 'date'])
                     .groupby(['team', 'season'], group_keys=False)
+                    .apply(rolling_adj_shots))
+
+        combined = (combined.sort_values(['team', 'season', 'date'])
+                    .groupby(['team', 'season'], group_keys=False)
                     .apply(rolling_shots_conc))
 
-        # Extract only future rows
-        future_only = combined[combined['shots_scored'].isna()].copy()
+        future_only = combined[combined['_is_future']].copy()
 
-        # Split back to home/away and rejoin onto future_df
         home_features = (future_only[future_only['venue'] == 'home']
                          [['team', 'date', 'season', 'rolling_adj_shots', 'opp_rolling_shots_conc']]
                          .copy())
@@ -439,9 +569,9 @@ class PreparePastData:
         future_df = future_df.merge(home_features, on=['date', 'home_team', 'season'], how='left')
         future_df = future_df.merge(away_features, on=['date', 'away_team', 'season'], how='left')
 
-        # Drop matches where either team lacks enough history for a rolling window
         before = len(future_df)
-        future_df = future_df.dropna(subset=['home_adj_shots', 'home_adj_shots_conc','away_adj_shots', 'away_adj_shots_conc'])
+        future_df = future_df.dropna(subset=['home_adj_shots', 'home_adj_shots_conc',
+                                             'away_adj_shots', 'away_adj_shots_conc'])
         dropped = before - len(future_df)
         if dropped > 0:
             print(f"[PreparePastData] Dropped {dropped} future match(es) with insufficient rolling history.")
@@ -449,25 +579,26 @@ class PreparePastData:
         return future_df.reset_index(drop=True)
 
     def _combine(self) -> pd.DataFrame:
-        """
-        Returns a single df of past + future matches.
-        Past rows have home_shots, away_shots and all rolling features.
-        Future rows have predictor variables only (shots are NaN).
-        """
         future_odds = self._fetch_future_odds()
 
         if future_odds.empty:
             print("[PreparePastData] No future odds fetched — returning past data only.")
             return self.data.copy()
 
+        # Translate odds-API names to football-data names before any merges
+        future_odds = self._apply_name_map(future_odds)
+
+        if future_odds.empty:
+            print("[PreparePastData] No future matches remaining after name mapping — returning past data only.")
+            return self.data.copy()
+
         future_with_features = self._create_future_adj_shots(future_odds)
 
-        # Align columns — future rows will have NaN for shot actuals
         future_with_features['home_shots'] = np.nan
         future_with_features['away_shots'] = np.nan
         future_with_features['is_future'] = True
 
-        self.future_data = future_with_features  # cache for inspection
+        self.future_data = future_with_features
 
         past = self.data.copy()
         past['is_future'] = False
