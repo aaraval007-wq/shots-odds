@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.stats import nbinom
+import pandas as pd
 from model import PredictModel
 
 

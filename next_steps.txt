@@ -1,5 +1,4 @@
-- confirm if all mappings are right (check for the random numbers in the middle) and check through odds again
-- Make the output class and final ipynb
+- Add more things which would be useful to add to final
 
 - check if prepare_data can be optimised
 
