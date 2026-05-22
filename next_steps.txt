@@ -1,4 +1,3 @@
-- Add more things which would be useful to add to final
-
-- check if prepare_data can be optimised
+- Make a goals prediction model from this
+- Binomial Beta Bin(K, p) K number of shots and p is beta (alpha, beta) which represents shot conversion
 
